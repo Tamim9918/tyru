@@ -1,345 +1,186 @@
 import requests
-import json
-import time
-import os
+import telebot
 from datetime import datetime
-import config
-import pycountry
-import phonenumbers
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-# ---------- persistence helpers ----------
-def load_sent_ids(path=config.SENT_DB_PATH):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+import time
+import re
+# ==========================
+# CONFIG
+# ==========================
+BOT_TOKEN = "8630811530:AAGxCDDqV0fLbeLcVb0eze1p6zGygfr1bqA"
+USERNAME = "sss148900"
+PASSWORD = "sss148900"
 
-def save_sent_ids(ids, path=config.SENT_DB_PATH):
+BASE = "http://51.89.99.105/NumberPanel"
+
+bot = telebot.TeleBot(BOT_TOKEN)
+session = requests.Session()
+
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+headers_ajax = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest"
+}
+
+
+# ==========================
+# LOGIN FUNCTION
+# ==========================
+def login():
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(list(ids), f)
-    except Exception as e:
-        print("[SENTDB] save error:", e)
+        print("Opening login page...")
+        r = session.get(BASE + "/login", headers=headers)
 
-# ---------- persistence helpers --------
-def load_sent_messages(path=config.SENT_DB_PATH):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # ডাটা যদি লিস্ট হয়, তবে সেটিকে খালি ডিকশনারিতে রূপান্তর করুন
-                if isinstance(data, list):
-                    return {}
-                return data
-        except Exception:
-            return {}
-    return {}
+        html = r.text
 
-def save_sent_messages(messages, path=config.SENT_DB_PATH):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(messages, f)
-    except Exception as e:
-        print("[SENTDB] save error:", e)
+        # Extract captcha numbers dynamically
+        match = re.search(r'What is (\d+) \+ (\d+)', html)
 
-def load_rr_state(path=config.RR_STATE_PATH):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {"next_index": 0}
-    return {"next_index": 0}
+        if not match:
+            print("Captcha not found!")
+            return False
 
-def save_rr_state(state, path=config.RR_STATE_PATH):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f)
-    except Exception as e:
-        print("[RR] save error:", e)
+        num1 = int(match.group(1))
+        num2 = int(match.group(2))
+        captcha_answer = str(num1 + num2)
 
-# ---------- telegram send helper (per-bot) ----------
-def send_with_bot(token, chat_id, text, reply_markup=None):
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    
-    if reply_markup:
-        # reply_markup এখন একটি ডিকশনারি, তাই সরাসরি JSON এ রূপান্তর করা যাবে
-        payload["reply_markup"] = reply_markup
+        print(f"Captcha: {num1} + {num2} = {captcha_answer}")
 
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code == 200:
-            return r.json().get("result").get("message_id")
-        else:
-            print("[TG] HTTP", r.status_code, r.text[:300])
-            return None
-    except Exception as e:
-        print("[TG] Exception:", e)
-        return None
+        payload = {
+            "username": USERNAME,
+            "password": PASSWORD,
+            "capt": captcha_answer
+        }
 
-# ---------- telegram delete helper ----------
-def delete_message_with_bot(token, chat_id, message_id):
-    url = f"https://api.telegram.org/bot{token}/deleteMessage"
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id
-    }
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        return r.status_code == 200
-    except Exception as e:
-        print("[TG] Delete Exception:", e)
+        headers_post = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": BASE + "/login",
+            "Origin": "http://51.89.99.105",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+
+        print("Sending login request...")
+        r2 = session.post(BASE + "/signin", data=payload, headers=headers_post)
+
+        print("Signin status:", r2.status_code)
+
+        # Check redirect
+        if "Location" in r2.headers:
+            print("Redirected to:", r2.headers["Location"])
+
+        dash = session.get(BASE + "/client/SMSDashboard", headers=headers)
+
+        if "SMSDashboard" in dash.text or "Logout" in dash.text:
+            print("Login SUCCESS")
+            return True
+
+        print("Login FAILED")
         return False
 
-# ---------- formatting & masking ----------
-def mask_number(number: str) -> str:
-    if not number or len(number) <= 8:
-        return number
-    return number[:5] + "***" + number[-3:]
-
-# ২. কান্ট্রি কোড থেকে পতাকা (Emoji) তৈরি করার ফাংশন
-def country_code_to_emoji(code):
-    if not code:
-        return "🏳️"
-    
-    # কোডটিকে ক্লিন করা: স্পেস মুছে ফেলা এবং বড় হাতের অক্ষরে রূপান্তর
-    code = str(code).strip().upper() 
-    
-    # কান্ট্রি কোড ম্যাপ (API তে কান্ট্রি কোড বা নাম যা-ই আসুক, তাকে সঠিক কোডে রূপান্তর করা)
-    aliases = {
-        "UK": "GB",
-        "EN": "GB",
-        "VN": "VN",
-        "VIETNAM": "VN", # Vietnamese
-        "CH": "CH",      # Switzerland
-        "US": "US",
-        "CN": "CN",
-        "RU": "RU"
-        # যদি অন্য কোনো দেশের পতাকা ভুল আসে, এখানে "ভুল নাম": "সঠিক কোড" ফরম্যাটে যোগ করুন
-    }
-    
-    # aliases এ থাকলে তা নেওয়া, নাহলে মূল কোডটি ব্যবহার করা
-    code = aliases.get(code, code)
-    
-    # যদি কোডটি ২ অক্ষরের না হয়, তবে সাদা পতাকা দেখানো
-    if len(code) != 2 or not code.isalpha():
-        return "🏳️"
-    
-    # সঠিক পতাকার ইমোজিতে রূপান্তর করা
-    return "".join(chr(127397 + ord(c)) for c in code)
-
-def format_item(it):
-    # ===== RAW DATA =====
-    platform_raw = str(it.get("platform", "WS")).upper()
-    number_raw = str(it.get("number", "")).replace("+", "").strip()
-
-    # ===== SERVICE SHORT MAP =====
-    service_map = {
-        "WHATSAPP": "WS",
-        "TELEGRAM": "TG",
-        "WS": "WS",
-        "TG": "TG"
-    }
-    service = service_map.get(platform_raw, platform_raw[:2])
-
-    # ===== COUNTRY DETECT FROM NUMBER ONLY =====
-    country_code = "UN"
-    try:
-        parsed = phonenumbers.parse("+" + number_raw, None)
-        region_code = phonenumbers.region_code_for_number(parsed)
-        if region_code:
-            country = pycountry.countries.get(alpha_2=region_code)
-            if country:
-                country_code = country.alpha_2
-    except:
-        pass
-
-    # ===== FLAG =====
-    flag = country_code_to_emoji(country_code)
-
-    # ===== NUMBER FORMAT =====
-    # +CC + delete next 3 digits → AWM
-    if len(number_raw) > 5:
-        formatted_number = f"+{number_raw[:2]}AWM{number_raw[5:]}"
-    else:
-        formatted_number = f"+{number_raw}"
-
-    language = "English"
-
-    # ===== ONE LINE FINAL FORMAT =====
-    # এখানে formatted_number এবং #language এর মাঝে একটি স্পেস ' ' যোগ করা হয়েছে
-    return f"#{service} #{country_code}{flag} {formatted_number} #{language}"
-
-def get_buttons(it):
-    # API থেকে OTP নেওয়া
-    otp = it.get("otp", "----")
-    
-    # বাটনগুলোর ডিকশনারি তৈরি
-    keyboard = [
-        [
-            # OTP বাটন (কপি টেক্সট সহ এবং রঙিন)
-            {
-                "text": f"📋 {otp}", 
-                "copy_text": {"text": str(otp)},
-                "style": "danger" # <--- বাটনটি লাল রঙের হবে
-            }
-        ],
-        [
-            # URL বাটন - রঙিন স্টাইল সহ
-            {
-                "text": "📞 Number Channel", 
-                "url": "https://t.me/Awm_Proxy_Store_bot",
-                "style": "primary" # <--- নীল
-            },
-            {
-                "text": "🤖 AWM Bot", 
-                "url": "https://t.me/AWM_NUMBER_BOT",
-                "style": "success" # <--- সবুজ
-            }
-        ]
-    ]
-    
-    # সরাসরি ডিকশনারিটি পাঠান
-    return {"inline_keyboard": keyboard}
-
-# ---------- fetch from container ----------
-def fetch_all_items():
-    headers = {"x-api-key": config.CONTAINER_API_KEY}
-    try:
-        r = requests.get(config.CONTAINER_URL, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        else:
-            print("[API] bad status:", r.status_code, r.text[:300])
-            return []
     except Exception as e:
-        print("[API] error:", e)
-        return []
+        print("Login Error:", e)
+        return False
 
-# ---------- round-robin logic ----------
-def choose_next_bot(rr_state, num_bots):
-    idx = rr_state.get("next_index", 0) % max(1, num_bots)
-    # update for next time
-    rr_state["next_index"] = (idx + 1) % max(1, num_bots)
-    return idx
 
-# ---------- main loop ----------
-# ---------- main loop ----------
-# ---------- main loop ----------
-def run_loop():
-    # sent_items dictionary use korbo id ar time store korar jonno
-    sent_items = load_sent_messages()
-    rr_state = load_rr_state()
-    print("[RUN] loaded sent items count:", len(sent_items))
-    print("[RUN] loaded rr_state:", rr_state)
+# ==========================
+# FETCH SMS
+# ==========================
 
-    # --- NEW LOGIC: Initialize with current timestamp to skip old OTPs ---
-    # Bot shuru howar somoy ekti time mark kore rakhbo
-    if "last_timestamp" not in rr_state:
-        # Initial timestamp is now, in seconds
-        rr_state["last_timestamp"] = time.time()
-        save_rr_state(rr_state)
-        print(f"[RUN] Initialized time marker: {rr_state['last_timestamp']}")
-    # -------------------------------------------------------------------------
-
-    if not config.BOT_TOKENS:
-        print("[ERR] No BOT_TOKENS configured in config.py. Exiting.")
-        return
-
-    num_bots = len(config.BOT_TOKENS)
-    if not config.BOT_CHAT_IDS:
-        bot_chat_ids = [config.CHAT_ID] * num_bots
-    else:
-        bot_chat_ids = (config.BOT_CHAT_IDS + [config.BOT_CHAT_IDS[-1]] * num_bots)[:num_bots]
-
+def fetch_sms():
     try:
-        while True:
-            # 1. Fetch New Messages
-            items = fetch_all_items()
-            if isinstance(items, list):
-                # sort by id ascending (oldest first)
-                items_sorted = sorted(items, key=lambda x: x.get("id", 0))
+        print("Opening SMSCDRStats page...")
+        stats = session.get(BASE + "/client/SMSCDRStats", headers=headers)
 
-                for it in items_sorted:
-                    iid = it.get("id")
-                    if iid is None: continue
-                    
-                    # --- NEW LOGIC: Skip old items based on time ---
-                    # it.get("time") API theke ashche kina check korun
-                    # jodi API theke time na ashe, tobe id based logic a fire jete hobe
-                    item_time = it.get("timestamp") # <--- URL a timestamp thakle ekhane likhun
-                    if item_time and item_time <= rr_state["last_timestamp"]:
-                        continue # Time purono hole skip koro
-                    # -------------------------------------------------
+        html = stats.text
 
-                    # check if already sent (item_id check korbo)
-                    is_already_sent = False
-                    for data in sent_items.values():
-                        if isinstance(data, dict) and str(data.get("item_id")) == str(iid):
-                            is_already_sent = True
-                            break
-                    
-                    if is_already_sent: continue
+        # Extract sesskey from this page
+        match = re.search(r'sesskey=([A-Za-z0-9+/=]+)', html)
 
-                    # choose bot
-                    bot_idx = choose_next_bot(rr_state, num_bots)
-                    token = config.BOT_TOKENS[bot_idx]
-                    chat_id = bot_chat_ids[bot_idx] if bot_chat_ids[bot_idx] else config.CHAT_ID
+        if not match:
+            print("Sesskey NOT found in SMSCDRStats page!")
+            print(html[:1200])
+            return None
 
-                    text = format_item(it)
-                    reply_markup = get_buttons(it) 
-                    
-                    # Message send kore id pawya
-                    message_id = send_with_bot(token, chat_id, text, reply_markup)
-                    
-                    if message_id:
-                        # Message data store kora (timestamp shoho)
-                        sent_items[str(message_id)] = {
-                            "timestamp": time.time(),
-                            "token": token,
-                            "chat_id": chat_id,
-                            "item_id": str(iid)
-                        }
-                        save_sent_messages(sent_items)
-                        print(f"[RUN] Sent message {message_id} (item={iid}) via bot#{bot_idx}")
-                    else:
-                        print(f"[RUN] failed to send id={iid} via bot#{bot_idx}")
+        sesskey = match.group(1)
+        print("Dynamic Sesskey:", sesskey)
 
-            # 2. Message Delete Check (60 seconds)
-            current_time = time.time()
-            items_to_keep = {}
-            for msg_id, data in sent_items.items():
-                if isinstance(data, dict) and "timestamp" in data:
-                    if current_time - data["timestamp"] > 60:
-                        ok = delete_message_with_bot(data["token"], data["chat_id"], msg_id)
-                        if not ok:
-                            items_to_keep[msg_id] = data
-                    else:
-                        items_to_keep[msg_id] = data
-                else:
-                    items_to_keep[msg_id] = data
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        url = BASE + "/client/res/data_smscdr.php"
+
+        params = {
+            "fdate1": f"{today} 00:00:00",
+            "fdate2": f"{today} 23:59:59",
+            "fg": "0",
+            "sesskey": sesskey,
+            "sEcho": "1",
+            "iColumns": "7",
+            "iDisplayStart": "0",
+            "iDisplayLength": "-1"
+        }
+
+        r = session.get(url, params=params, headers=headers_ajax)
+
+        print("SMS Status:", r.status_code)
+
+        try:
+            return r.json()
+        except:
+            print("Not JSON Response:")
+            print(r.text[:500])
+            return None
+
+    except Exception as e:
+        print("Fetch Error:", e)
+        return None
+
+
+# ==========================
+# AUTO START SYSTEM (Updated)
+# ==========================
+
+def run_bot():
+    print("Bot Starting and Monitoring SMS...")
+    
+    # প্রথমবার রান করার সময় একবার লগইন করে নেওয়া
+    if not login():
+        print("Initial login failed! Checking again in 60s...")
+        time.sleep(60)
+
+    while True:
+        try:
+            # ১. ডাটা ফেচ করার চেষ্টা করো
+            data = fetch_sms()
             
-            if len(items_to_keep) != len(sent_items):
-                sent_items = items_to_keep
-                save_sent_messages(sent_items)
+            # ২. যদি সেশন আউট হয়ে যায় বা ডাটা না আসে
+            if data is None:
+                print("Session expired or error. Re-logging in...")
+                if login():
+                    continue 
+                else:
+                    print("Login failed. Sleeping for 1 minute before retry.")
+                    time.sleep(60)
+                    continue
 
-            # 3. SHORT SLEEP
-            time.sleep(1)
+            # ৩. ডাটা প্রসেস করো
+            records = data.get("aaData", [])
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Total SMS found: {len(records)}")
+            
+            # এখানে তুমি তোমার SMS প্রিন্ট বা টেলিগ্রামে পাঠানোর কাজ করতে পারো
+            for row in records[:5]: # উদাহরণস্বরূপ প্রথম ৫টি
+                print(f"Number: {row[1]} | Msg: {row[3]}")
 
-    except KeyboardInterrupt:
-        print("[RUN] stopped by user")
-    finally:
-        save_sent_messages(sent_items)
-        save_rr_state(rr_state)
+        except Exception as e:
+            print(f"Loop Error: {e}")
+        
+        # ৪. পরবর্তী চেকের জন্য অপেক্ষা
+        print("Waiting 60 seconds for next check...")
+        time.sleep(60)
 
+# মেন পার্ট
 if __name__ == "__main__":
-    run_loop()
+    # যেহেতু তুমি ২৪/৭ অটো চেক করতে চাও, তাই সরাসরি run_bot() কল করা হলো
+    run_bot()
